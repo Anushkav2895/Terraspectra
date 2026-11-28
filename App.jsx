@@ -6,30 +6,30 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 import { LayoutDashboard, MapPin, Leaf, FileText, Settings, LogOut, Search, Bell, CalendarDays, Upload, Download, ShieldCheck, ShieldAlert, Activity, Sprout, Satellite } from "lucide-react";
 
 const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? "http://127.0.0.1:8000/predict_raw" : "/predict_raw"); // set VITE_API_URL when hosting the dashboard separately (e.g. Vercel)
-const ORIGIN = { lng: 113.0, lat: 35.0 }; // demo location (dataset has no GPS)
-const TILE_M = 100; // each 64x64 tile is drawn as 100 m x 100 m (demo scale)
+const DEFAULT_ORIGIN = { lng: 129.64959, lat: 44.54077, m: 40 }; // demo location = CENTRE of the demo farm (dataset has no GPS); can be changed in Settings
+const tileOf = (o) => o.m || 40; // metres per 64x64 tile on the map (demo scale; changeable in Settings)
 const COLORS = { Health: [46, 230, 140], Other: [250, 176, 40], Rust: [244, 67, 80] };
 const NAMES = { Health: "Healthy", Other: "Other", Rust: "Rust (diseased)" };
-const DEFAULT_VIEW = { longitude: ORIGIN.lng, latitude: ORIGIN.lat, zoom: 15 };
-const cosLat = Math.cos((ORIGIN.lat * Math.PI) / 180);
-const dLat = TILE_M / 111320, dLng = TILE_M / (111320 * cosLat);
+const geo = (o) => { const m = tileOf(o); const c = Math.cos((o.lat * Math.PI) / 180); return { c, m, dLat: m / 111320, dLng: m / (111320 * c) }; };
 const rgb = (c) => `rgb(${COLORS[c].join(",")})`;
 const DEMO_ONLY = window.location.hostname.endsWith(".vercel.app"); // the hosted demo has no model server
 const NAV = [["dashboard", "Dashboard", LayoutDashboard], ["map", "Field Monitor", MapPin], ["analysis", "Disease Analysis", Leaf], ["reports", "Reports", FileText], ["settings", "Settings", Settings]];
 
-function buildTiles(r) {
+function buildTiles(r, o) {
+  const { dLat, dLng } = geo(o);
   const out = [];
   for (let i = 0; i < r.grid_rows; i++)
     for (let j = 0; j < r.grid_cols; j++) {
-      const w = ORIGIN.lng + j * dLng, s = ORIGIN.lat + (r.grid_rows - 1 - i) * dLat;
+      const w = o.lng + (j - r.grid_cols / 2) * dLng, s = o.lat + (r.grid_rows / 2 - 1 - i) * dLat;
       out.push({ id: String.fromCharCode(65 + i) + (j + 1), row: i, col: j, label: r.classes[r.grid[i][j]], rust: r.rust_probability[i][j],
         conf: r.confidence ? r.confidence[i][j] : r.rust_probability[i][j], polygon: [[w, s], [w + dLng, s], [w + dLng, s + dLat], [w, s + dLat]] });
     }
   return out;
 }
-function buildView(r) {
-  const width = Math.max(r.grid_cols, r.grid_rows) * TILE_M;
-  return { longitude: ORIGIN.lng + (r.grid_cols * dLng) / 2, latitude: ORIGIN.lat + (r.grid_rows * dLat) / 2,
+function buildView(r, o) {
+  const { c: cosLat, m } = geo(o);
+  const width = Math.max(r.grid_cols, r.grid_rows) * m;
+  return { longitude: o.lng, latitude: o.lat,
     zoom: Math.min(18, Math.log2((156543 * cosLat * 560) / width) - 0.8), pitch: 50, bearing: -15 };
 }
 function makeDates(n) { // demo dates over the dataset's flight window
@@ -73,10 +73,10 @@ function ZonePanel({ zone, selected }) {
     </div>
   );
 }
-function MapCard({ tiles, view, mode, setMode, picked, setPicked, zone, height, results, step, setStep, playing, setPlaying, dates }) {
+function MapCard({ tiles, view, mode, setMode, picked, setPicked, zone, height, results, step, setStep, playing, setPlaying, dates, tileM }) {
   const layers = [SATELLITE, new PolygonLayer({
     id: "zones", data: tiles, getPolygon: (d) => d.polygon, pickable: true, wireframe: false, extruded: mode === "risk", filled: mode === "risk", stroked: true,
-    getElevation: (d) => (d.label === "Rust" ? 10 + d.rust * 50 : 3), getLineColor: [255, 255, 255, mode === "risk" ? 120 : 200], lineWidthMinPixels: 1,
+    getElevation: (d) => (d.label === "Rust" ? 10 + d.rust * 50 : 3) * (tileM / 100), getLineColor: [255, 255, 255, mode === "risk" ? 120 : 200], lineWidthMinPixels: 1,
     getFillColor: (d) => [...COLORS[d.label], 200],
   })];
   return (
@@ -117,12 +117,14 @@ export default function App() {
   const [name, setName] = useState("Anushka");
   const [notify, setNotify] = useState(true);
   const [demo, setDemo] = useState(false);
+  const [origin, setOrigin] = useState(() => { try { const o = JSON.parse(localStorage.getItem("tsOrigin")); if (o && isFinite(o.lat) && isFinite(o.lng)) return o; } catch (e) {} return DEFAULT_ORIGIN; });
+  const moveFarm = (p) => { const o = { ...origin, ...p }; setOrigin(o); try { localStorage.setItem("tsOrigin", JSON.stringify(o)); } catch (e) {} };
   const fileRef = useRef(null);
 
   const result = results[step] || null;
   const dates = useMemo(() => makeDates(results.length), [results.length]);
-  const tiles = useMemo(() => (result ? buildTiles(result) : []), [result]);
-  const view = useMemo(() => (results.length ? buildView(results[0]) : DEFAULT_VIEW), [results]);
+  const tiles = useMemo(() => (result ? buildTiles(result, origin) : []), [result, origin]);
+  const view = useMemo(() => (results.length ? buildView(results[0], origin) : { longitude: origin.lng, latitude: origin.lat, zoom: 15 }), [results, origin]);
   const total = result ? result.grid_rows * result.grid_cols : 0;
   const rp = result ? result.rust_percent : 0;
   const top = tiles.reduce((a, t) => (!a || t.rust > a.rust ? t : a), null);
@@ -162,13 +164,13 @@ export default function App() {
     } catch (err) { setError(String(err.message || err)); } finally { setProgress(null); }
   }
   function downloadCsv(i) {
-    const rows = ["zone,class,rust_probability,confidence", ...buildTiles(results[i]).map((t) => [t.id, t.label, t.rust, t.conf].join(","))];
+    const rows = ["zone,class,rust_probability,confidence", ...buildTiles(results[i], origin).map((t) => [t.id, t.label, t.rust, t.conf].join(","))];
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([rows.join("\n")], { type: "text/csv" }));
     a.download = `terraspectra_${dates[i].replace(" ", "_")}.csv`;
     a.click();
   }
-  const mapProps = { tiles, view, mode, setMode, picked, setPicked, zone, results, step, setStep, playing, setPlaying, dates };
+  const mapProps = { tiles, view, mode, setMode, picked, setPicked, zone, results, step, setStep, playing, setPlaying, dates, tileM: tileOf(origin) };
   const Upload1 = (
     <label className="drop"><Upload size={22} /><b>{progress ? `Analysing ${progress.i} of ${progress.n}...` : "Upload hyperspectral images"}</b>
       <small>.tif files: 1 image, or several (one per date) for the timeline</small><input ref={fileRef} type="file" accept=".tif,.tiff" multiple onChange={onFiles} hidden />
@@ -247,7 +249,10 @@ export default function App() {
         {page === "settings" && (<div className="card narrow"><h3><Settings size={16} /> Settings</h3>
           <label className="field">Display name<input value={name} onChange={(e) => setName(e.target.value)} /></label>
           <label className="field row"><input type="checkbox" checked={notify} onChange={(e) => setNotify(e.target.checked)} /> Show high-risk alerts in the bell menu</label>
-          <small className="muted">Settings are kept only while this page is open (demo).</small></div>)}
+          <label className="field">Demo farm centre latitude<input type="number" step="0.001" defaultValue={origin.lat} onChange={(e) => e.target.value !== "" && moveFarm({ lat: Number(e.target.value) })} /></label>
+          <label className="field">Demo farm centre longitude<input type="number" step="0.001" defaultValue={origin.lng} onChange={(e) => e.target.value !== "" && moveFarm({ lng: Number(e.target.value) })} /></label>
+          <label className="field">Tile size (metres, demo scale)<input type="number" min="5" max="300" step="5" defaultValue={tileOf(origin)} onChange={(e) => Number(e.target.value) >= 5 && moveFarm({ m: Number(e.target.value) })} /></label>
+          <small className="muted">Smaller tiles make the whole demo farm smaller (it is 8 x 8 tiles; 40 m tiles give a farm about 320 m wide). The dataset has no GPS, so this is only where the demo farm is drawn on the satellite map. Pick a spot over farmland (in Google Maps, right-click a field and copy its coordinates) so the colors sit on crops. The model results do not change with the location. Name is kept only while this page is open; the location is remembered in this browser.</small></div>)}
       </main>
 
       <aside className="right">
